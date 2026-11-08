@@ -147,6 +147,16 @@ fun CaseStage() {
         }
     }
 
+    // The thick case boards behind the panels whose text is printed on paper.
+    LaunchedEffect(table) {
+        val t = table ?: return@LaunchedEffect
+        for ((id, name) in PANEL_FRAMES) {
+            runCatching { Entity.loadSuspend("asset://panels/$name.glb") }
+                .onSuccess { t.setFrame(id, it) }
+                .onFailure { Log.w(TAG, "frame $name: ${it.message}") }
+        }
+    }
+
     // Load the case's miniature when the case changes (or restarts).
     LaunchedEffect(Game.sceneVersion, table) {
         val t = table ?: return@LaunchedEffect
@@ -327,13 +337,10 @@ fun CaseStage() {
         initial = { content, attachments ->
             // A desk lamp from the upper left, and a cool fill from the right.
             content.addEntity(Entity().apply {
-                components.set(DirectionalLightComponent(Color(0xFFFFE2B8).toColor4(), 900f, true))
+                components.set(DirectionalLightComponent(Color(0xFFFFE2B8).toColor4(), 900f, false))
                 components[TransformComponent::class.java]?.setEulerAngles(EulerAngles(-55f, 35f, 0f))
             })
-            content.addEntity(Entity().apply {
-                components.set(DirectionalLightComponent(Color(0xFFBFD0FF).toColor4(), 200f))
-                components[TransformComponent::class.java]?.setEulerAngles(EulerAngles(-20f, -130f, 0f))
-            })
+            // The cool fill light was dropped: the IBL gives the shadows their colour, for less per-pixel work.
             val t = Diorama()
             t.placeInRoom(Game.tableHeight)
             content.addEntity(t.root)
@@ -369,6 +376,8 @@ fun CaseStage() {
 }
 
 /** Scene panels, placed in the table's frame (+z toward the player). */
+private val PANEL_FRAMES = mapOf(PANEL_INTRO to "panel_intro", PANEL_CASE to "panel_case", PANEL_TALK to "panel_talk", PANEL_RESULT to "panel_result")
+
 private fun attachPanels(t: Diorama, attachments: SpatialViewAttachments) {
     fun put(id: String, pos: Vector3) {
         if (!t.hasPanel(id)) t.attachPanel(id, attachments.entity(id), pos)

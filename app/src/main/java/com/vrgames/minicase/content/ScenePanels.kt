@@ -21,6 +21,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -151,22 +155,54 @@ private fun SceneCard(converter: PhysicalLengthConverter, width: Float, accent: 
     ) { content() }
 }
 
+// Ink on the manila case paper inside the board frames.
+private val PaperInk = Color(0xFF2A2118)
+private val PaperDim = Color(0xFF65543F)
+private val PaperTitle = Color(0xFF7B2415)
+private val PaperGreen = Color(0xFF1F5438)
+
+/** Inside sizes of the thick case-board frames (panels/panel_*.glb); text must fit them. */
+const val INTRO_W = 0.56f; const val INTRO_H = 0.46f
+const val CASE_W = 0.48f; const val CASE_H = 0.32f
+const val TALK_W = 0.5f; const val TALK_H = 0.5f
+const val RESULT_W = 0.54f; const val RESULT_H = 0.42f
+
+/** Text on the paper of a case board (the frame model is added by the scene). */
+@Composable
+private fun BoardCard(converter: PhysicalLengthConverter, width: Float, height: Float, content: @Composable () -> Unit) {
+    Column(
+        Modifier.width(converter.m(width)).height(converter.m(height)).padding(horizontal = converter.m(0.02f), vertical = converter.m(0.008f)),
+        verticalArrangement = Arrangement.spacedBy(converter.m(0.008f), Alignment.CenterVertically),
+    ) { content() }
+}
+
+/** The brass speaker: plays a character's recorded line again, or stops it. */
+@Composable
+private fun SpeakerButton(converter: PhysicalLengthConverter, playing: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier.size(converter.m(0.05f)).clip(CircleShape)
+            .background(Brush.radialGradient(listOf(Color(0xFFE9C46A), Color(0xFF8A6420))))
+            .border(converter.m(0.002f), Color(0xFF4F3A12), CircleShape).clickable { onClick() },
+        contentAlignment = Alignment.Center,
+    ) { Text(if (playing) "■" else "▶", fontSize = converter.sz(0.02f), color = Color(0xFF2A1F00)) }
+}
+
 /** The title card over the back of the table. */
 @Composable
 fun IntroPanel(converter: PhysicalLengthConverter) {
     @Suppress("UNUSED_VARIABLE") val v = Game.version
     val fresh = Cases.all.none { Game.book.investigation(it.id).found.isNotEmpty() }
-    SceneCard(converter, 0.54f) {
-        Text("微缩奇案", fontSize = converter.sz(0.045f), color = Brass)
-        Text("案发现场，按二十分之一缩小，送到了你的桌上。", fontSize = converter.sz(0.021f), color = LabelInk)
-        Text("怎么查：", fontSize = converter.sz(0.021f), color = Brass)
-        Text("① 用拇指和食指捏住抽屉、箱盖往外拉；捏住屋顶往上提", fontSize = converter.sz(0.019f), color = LabelInk)
-        Text("② 捏起小物件，它会飞到你面前；捏着转动，看看每一面", fontSize = converter.sz(0.019f), color = LabelInk)
-        Text("③ 捏一下小人偶，就能向他问话", fontSize = converter.sz(0.019f), color = LabelInk)
-        Text("④ 在「案情板」上把两条线索联系起来，最后指认真凶", fontSize = converter.sz(0.019f), color = LabelInk)
-        Text("两根手指捏，不要整只手去抓；张开手指就是松手。进度自动保存。", fontSize = converter.sz(0.016f), color = Dim)
+    BoardCard(converter, INTRO_W, INTRO_H) {
+        Text("微缩奇案", fontSize = converter.sz(0.045f), color = PaperTitle)
+        Text("案发现场，按二十分之一缩小，送到了你的桌上。", fontSize = converter.sz(0.021f), color = PaperInk)
+        Text("怎么查：", fontSize = converter.sz(0.021f), color = PaperTitle)
+        Text("① 用拇指和食指捏住抽屉、箱盖往外拉；捏住屋顶往上提", fontSize = converter.sz(0.019f), color = PaperInk)
+        Text("② 捏起小物件，它会飞到你面前；捏着转动，看看每一面", fontSize = converter.sz(0.019f), color = PaperInk)
+        Text("③ 捏一下小人偶，就能向他问话", fontSize = converter.sz(0.019f), color = PaperInk)
+        Text("④ 在「案情板」上把两条线索联系起来，最后指认真凶", fontSize = converter.sz(0.019f), color = PaperInk)
+        Text("两根手指捏，不要整只手去抓；张开手指就是松手。进度自动保存。", fontSize = converter.sz(0.016f), color = PaperDim)
         PinchLine(if (fresh) "捏一下这里：开始查案" else "捏一下这里：继续查案", Brass, converter) { Game.start() }
-        Text(DISCLAIMER, fontSize = converter.sz(0.012f), color = Dim)
+        Text(DISCLAIMER, fontSize = converter.sz(0.012f), color = PaperDim)
     }
 }
 
@@ -175,10 +211,10 @@ fun IntroPanel(converter: PhysicalLengthConverter) {
 fun CaseCard(converter: PhysicalLengthConverter) {
     @Suppress("UNUSED_VARIABLE") val v = Game.version
     val c = Game.inv.case
-    SceneCard(converter, 0.44f) {
-        Text("第 ${c.number} 案　${c.title}", fontSize = converter.sz(0.03f), color = Brass)
-        Text("${c.place}　${c.time}", fontSize = converter.sz(0.016f), color = Dim)
-        Text(c.brief, fontSize = converter.sz(0.018f), color = LabelInk)
+    BoardCard(converter, CASE_W, CASE_H) {
+        Text("第 ${c.number} 案　${c.title}", fontSize = converter.sz(0.03f), color = PaperTitle)
+        Text("${c.place}　${c.time}", fontSize = converter.sz(0.016f), color = PaperDim)
+        Text(c.brief, fontSize = converter.sz(0.018f), color = PaperInk)
         PinchLine("开始调查", Brass, converter) { Game.caseCardDismissed = true }
     }
 }
@@ -190,17 +226,24 @@ fun TalkPanel(converter: PhysicalLengthConverter) {
     val id = Game.talkingTo ?: return
     val inv = Game.inv
     val p = inv.case.people.firstOrNull { it.id == id } ?: return
-    SceneCard(converter, 0.46f, Jade) {
-        Text("${p.name}　${p.role}", fontSize = converter.sz(0.028f), color = Jade)
-        Text(p.intro, fontSize = converter.sz(0.016f), color = Dim)
-        Game.lastAnswer?.let { Text("「$it」", fontSize = converter.sz(0.019f), color = LabelInk) }
+    BoardCard(converter, TALK_W, TALK_H) {
+        Text("${p.name}　${p.role}", fontSize = converter.sz(0.028f), color = PaperGreen)
+        Text(p.intro, fontSize = converter.sz(0.016f), color = PaperDim)
+        Game.lastAnswer?.let { answer ->
+            Row(horizontalArrangement = Arrangement.spacedBy(converter.m(0.01f)), verticalAlignment = Alignment.CenterVertically) {
+                Game.lastQuestion?.let { q ->
+                    SpeakerButton(converter, Game.speaking == q) { if (Game.speaking == q) Game.stopSpeaking() else Game.speak(q) }
+                }
+                Text("「$answer」", fontSize = converter.sz(0.019f), color = PaperInk)
+            }
+        }
         val open = p.questions.filter { inv.canAsk(it) }
         for (q in open) {
             val asked = q.id in inv.asked
             PinchLine((if (asked) "（问过）" else "") + q.ask, if (asked) Dim else Jade, converter, 0.42f) { Game.ask(q.id) }
         }
         val locked = p.questions.size - open.size
-        if (locked > 0) Text("还有 $locked 个问题，要等找到相关的线索才能问。", fontSize = converter.sz(0.015f), color = Dim)
+        if (locked > 0) Text("还有 $locked 个问题，要等找到相关的线索才能问。", fontSize = converter.sz(0.015f), color = PaperDim)
         PinchLine("结束问话", Dim, converter) { Game.talk(null) }
     }
 }
@@ -253,12 +296,12 @@ fun ResultPanel(converter: PhysicalLengthConverter) {
     val inv = Game.inv
     if (!inv.solved) return
     val next = Game.book.next()
-    SceneCard(converter, 0.5f) {
-        Text("结案！真凶是${inv.case.person(inv.case.solution.culprit).name}", fontSize = converter.sz(0.03f), color = Brass)
-        Text(inv.case.truth, fontSize = converter.sz(0.017f), color = LabelInk)
-        Text("找到线索 ${inv.found.size} / ${inv.case.clues.size}　用了提示 ${inv.hintsUsed} 次　指认错 ${inv.wrongAccusations} 次", fontSize = converter.sz(0.015f), color = Dim)
+    BoardCard(converter, RESULT_W, RESULT_H) {
+        Text("结案！真凶是${inv.case.person(inv.case.solution.culprit).name}", fontSize = converter.sz(0.03f), color = PaperTitle)
+        Text(inv.case.truth, fontSize = converter.sz(0.017f), color = PaperInk)
+        Text("找到线索 ${inv.found.size} / ${inv.case.clues.size}　用了提示 ${inv.hintsUsed} 次　指认错 ${inv.wrongAccusations} 次", fontSize = converter.sz(0.015f), color = PaperDim)
         if (next != null) PinchLine("下一案：${next.title} →", Brass, converter) { Game.nextCase() }
-        else Text("三个案子全部告破。谢谢你，探长。", fontSize = converter.sz(0.02f), color = Brass)
+        else Text("三个案子全部告破。谢谢你，探长。", fontSize = converter.sz(0.02f), color = PaperTitle)
         PinchLine("从头再查一遍", Dim, converter) { Game.restartCase() }
     }
 }

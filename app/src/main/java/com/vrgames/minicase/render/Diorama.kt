@@ -428,9 +428,19 @@ class Diorama {
 
     private val panels = HashMap<String, Entity>()
 
+    /** Thick case-board frames, by panel id, placed behind their panels when these attach. */
+    private val frames = HashMap<String, Entity>()
+
+    /** Gives a panel its frame: now if the panel is already attached, otherwise when it attaches. */
+    fun setFrame(id: String, frame: Entity) {
+        frames[id] = frame
+        panels[id]?.let { e -> frame.setPos(Vector3(0f, 0f, -0.006f)); e.addChild(frame) }
+    }
+
     fun attachPanel(id: String, e: Entity?, pos: Vector3) {
         if (e == null || id in panels) return
         root.addChild(e)
+        frames[id]?.let { f -> f.setPos(Vector3(0f, 0f, -0.006f)); e.addChild(f) }
         e.setPos(pos)
         e.enabled = false
         panels[id] = e

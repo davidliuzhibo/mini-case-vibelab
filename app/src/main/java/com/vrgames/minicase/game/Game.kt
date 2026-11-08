@@ -87,6 +87,7 @@ object Game {
     var debugOpen by mutableStateOf<String?>(null)
 
     fun init(context: Context) {
+        appContext = context.applicationContext
         if (prefs != null) return
         val p = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         prefs = p
@@ -148,16 +149,52 @@ object Game {
     }
 
     fun talk(personId: String?) {
+        stopSpeaking()
         talkingTo = personId
         lastAnswer = null
         caseCardDismissed = true
         if (personId != null) coach()
     }
 
+    /** The question whose answer is on show (its recording: narration/<id>.ogg). */
+    var lastQuestion by mutableStateOf<String?>(null); private set
+    /** The recording now playing, or null. */
+    var speaking by mutableStateOf<String?>(null); private set
+    private var narrator: android.media.MediaPlayer? = null
+    private var appContext: android.content.Context? = null
+
+    /** Plays a character's recorded line; the music dips under it. */
+    fun speak(id: String) {
+        stopSpeaking()
+        val c = appContext ?: return
+        runCatching {
+            val fd = c.assets.openFd("narration/$id.ogg")
+            narrator = android.media.MediaPlayer().apply {
+                setDataSource(fd.fileDescriptor, fd.startOffset, fd.length)
+                fd.close()
+                setOnCompletionListener { stopSpeaking() }
+                prepare()
+                start()
+            }
+            speaking = id
+            music?.ducked = true
+        }.onFailure { android.util.Log.i("MiniCase", "line $id: ${it.message}") }
+    }
+
+    fun stopSpeaking() {
+        runCatching { narrator?.stop() }
+        runCatching { narrator?.release() }
+        narrator = null
+        speaking = null
+        music?.ducked = false
+    }
+
     fun ask(questionId: String) {
         val q = inv.case.people.flatMap { it.questions }.first { it.id == questionId }
         val got = synchronized(lock) { inv.ask(questionId) }
         lastAnswer = q.answer
+        lastQuestion = questionId
+        speak(questionId)
         if ((hint as? Investigation.Hint.Ask)?.question?.id == questionId) hint = null
         found(got)
     }
