@@ -14,8 +14,8 @@ android {
         applicationId = "com.vrgames.minicase"
         minSdk = 35
         targetSdk = 35
-        versionCode = 6
-        versionName = "0.5.1"
+        versionCode = 10
+        versionName = "0.6.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters.add("arm64-v8a") }

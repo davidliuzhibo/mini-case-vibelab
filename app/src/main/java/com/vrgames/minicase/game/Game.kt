@@ -6,7 +6,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import com.vrgames.minicase.BOARD_ID
 import com.vrgames.minicase.core.Cases
 import com.vrgames.minicase.core.Casebook
 import com.vrgames.minicase.core.Clue
@@ -36,8 +35,10 @@ object Game {
     /** The case card (who, where, what happened) has been put away; it comes back with each case. */
     var caseCardDismissed by mutableStateOf(false)
     var menuOpen by mutableStateOf(false)
+    /** The 案情板 stands open behind the scene (it takes the place of the case card and the talk). */
+    var boardOpen by mutableStateOf(false)
     /**
-     * The window on screen ([BOARD_ID] or [FILE_ID]), or null. One at a time, and never twice: opening a
+     * The window on screen ([com.vrgames.minicase.FILE_ID]), or null. One at a time, and never twice: opening a
      * window that is already open starts a second copy of it.
      */
     var window by mutableStateOf<String?>(null); private set
@@ -123,7 +124,7 @@ object Game {
     fun nextCase() {
         val next = synchronized(lock) { book.next() } ?: return
         // The board would show the new case over its scene: let the case card on the table start it.
-        closeWindow(BOARD_ID)
+        boardOpen = false
         select(next.id)
     }
 
@@ -153,6 +154,8 @@ object Game {
         talkingTo = personId
         lastAnswer = null
         caseCardDismissed = true
+        // Talk and the board share the place behind the scene.
+        if (personId != null) boardOpen = false
         if (personId != null) coach()
     }
 

@@ -16,6 +16,7 @@ import com.vrgames.minicase.core.Investigation
 import com.vrgames.minicase.core.Side
 import com.vrgames.minicase.core.Vec3
 import kotlin.math.abs
+import kotlin.math.acos
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -166,6 +167,8 @@ class Diorama {
     private var inspectT = 0.0
     private var yaw = 0.0
     private var pitch = 0.0
+    /** The held prop's turn by the hand's own rotation (table frame), under the drag's yaw and pitch. */
+    private var handTurn = Quat(0f, 0f, 0f, 1f)
     private var hiddenSeen = 0.0
 
     val dragging get() = grab != null
@@ -241,6 +244,19 @@ class Diorama {
         }
     }
 
+    /**
+     * The pinching hand turned by [rel] (content frame) since the last move: a prop held up close turns
+     * with it, as if held in the fingers (PICO's advice, 2026-11-12). Jumps of tracking are ignored.
+     */
+    fun turnByHand(rel: Quat) {
+        if (inspecting == null || grab !is Grab.Prop) return
+        val w = abs(rel.w.toDouble()).coerceAtMost(1.0)
+        if (Math.toDegrees(2 * acos(w)) > 30) return
+        val r = root.transform().quaternion
+        val local = r.conjugate().times(rel).times(r)
+        handTurn = local.times(handTurn).normalize()
+    }
+
     /** What letting go did. */
     sealed interface Released {
         data class Opened(val prop: String) : Released
@@ -309,6 +325,7 @@ class Diorama {
         inspectT = 0.0
         yaw = 0.0
         pitch = 0.0
+        handTurn = Quat(0f, 0f, 0f, 1f)
         hiddenSeen = 0.0
         // Into the table's frame (keeping where it is), then fly to the close-up spot.
         val at = v.e.convertPositionTo(Vector3(0f, 0f, 0f), root)
@@ -367,7 +384,7 @@ class Diorama {
         t.position = pos.toVector3()
         t.scaleVector = Vector3((v.homeScale.x * scale).toFloat(), (v.homeScale.y * scale).toFloat(), (v.homeScale.z * scale).toFloat())
         // Face the player, then the hand's turn on top.
-        val turn = axisAngle(Vec3(0.0, 1.0, 0.0), yaw).times(axisAngle(Vec3(1.0, 0.0, 0.0), pitch))
+        val turn = handTurn.times(axisAngle(Vec3(0.0, 1.0, 0.0), yaw).times(axisAngle(Vec3(1.0, 0.0, 0.0), pitch)))
         t.quaternion = Quat.slerp(flyRot, turn, e.toFloat())
         val side = v.hidden ?: return
         if (inspectT < 1.0) return
@@ -446,6 +463,37 @@ class Diorama {
         panels[id] = e
     }
 
+    /**
+     * The detective's desk round the scene (2026-11-10 review: the scene needed more around it): a
+     * leather mat under the miniature, and real-size things at its sides, clear of the panels and of
+     * the line of sight to the case board. [props]: name to the loaded model (any may be missing).
+     */
+    fun setDesk(props: Map<String, Entity>) {
+        if (desk != null) return
+        val d = Entity().also { root.addChild(it) }
+        // Its top just under the scene's floor, so the two never fight.
+        d.addChild(model(MeshResource.createBox(Vector3(0.82f, 0.003f, 0.52f), 0.006f), pbr(color(0.10f, 0.20f, 0.14f), 0f, 0.75f).shared()).apply {
+            setPos(Vector3(0f, -0.0028f, -0.01f))
+        })
+        d.addChild(model(MeshResource.createBox(Vector3(0.84f, 0.002f, 0.54f), 0.008f), pbr(color(0.45f, 0.30f, 0.12f), 0.6f, 0.4f).shared()).apply {
+            setPos(Vector3(0f, -0.0042f, -0.01f))
+        })
+        for ((name, at) in DESK) {
+            val e = props[name] ?: continue
+            // Laid flat ones turn about x first (their face up), inside a holder that turns about y.
+            val holder = Entity().apply { setPos(Vector3(at.x, 0f, at.z)); transform().eulerAngles = EulerAngles(0f, at.yaw, 0f) }
+            holder.addChild(e)
+            if (at.flat) {
+                e.setPos(Vector3(0f, at.thick / 2, at.long / 2))
+                e.transform().eulerAngles = EulerAngles(-90f, 0f, 0f)
+            }
+            d.addChild(holder)
+        }
+        desk = d
+    }
+
+    private var desk: Entity? = null
+
     fun hasPanel(id: String) = id in panels
 
     fun showPanel(id: String, on: Boolean) {
@@ -459,6 +507,18 @@ class Diorama {
     companion object {
         /** Table middle, this far in front of the player (0.62 m felt in the player's lap on the device). */
         const val TABLE_Z = 0.75f
+        /**
+         * The desk props (models/desk_<name>.glb): where on the table, the turn about y (degrees), and
+         * for things made standing on edge, laid flat: their thickness and their length (meters).
+         */
+        class DeskProp(val x: Float, val z: Float, val yaw: Float, val flat: Boolean = false, val thick: Float = 0f, val long: Float = 0f)
+
+        val DESK = mapOf(
+            "lamp" to DeskProp(-0.6f, -0.42f, 35f),
+            "files" to DeskProp(-0.5f, -0.1f, 12f),
+            "magnifier" to DeskProp(0.52f, -0.02f, -25f),
+            "inkwell" to DeskProp(0.5f, -0.26f, -10f),
+        )
         /**
          * Added to the head's heading: on the device the scene came out turned 10-15 degrees
          * counterclockwise of straight ahead (negative turns it clockwise, seen from above).

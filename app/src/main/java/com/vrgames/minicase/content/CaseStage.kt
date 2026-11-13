@@ -1,5 +1,8 @@
 package com.vrgames.minicase.content
 
+import com.pico.spatial.core.container.SpatialViewContent
+import com.pico.spatial.core.ecs.ViewCoordinateSpace
+import com.pico.spatial.core.math.Quat
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -34,7 +37,6 @@ import com.pico.spatial.ui.foundation.gesture.detectSpatialDragGesture
 import com.pico.spatial.ui.platform.LengthUnit
 import com.pico.spatial.ui.platform.LocalPhysicalLengthConverter
 import com.pico.spatial.ui.platform.containers.LocalSpatialNavigator
-import com.vrgames.minicase.BOARD_ID
 import com.vrgames.minicase.FILE_ID
 import com.vrgames.minicase.core.Action
 import com.vrgames.minicase.core.Cases
@@ -71,6 +73,9 @@ fun CaseStage() {
     val hands = remember { HandTrackingProvider() }
     // The hand that pinched the current drag (0 left, 1 right, -1 unknown) and open frames seen.
     val pinch = remember { intArrayOf(-1, 0) }
+    // The hand's orientation at the last drag move, and the content (to bring it into its frame).
+    val lastHand = remember { arrayOfNulls<Quat>(1) }
+    val contentRef = remember { arrayOfNulls<SpatialViewContent>(1) }
     val head = remember { HMDTrackingProvider() }
     val headPose = { runCatching { if (head.state == DataProvider.State.STARTED) head.latestData?.hmdPose else null }.getOrNull() }
     // Turns the table to where the player looks now; false until the pose is in.
@@ -98,7 +103,14 @@ fun CaseStage() {
             navigator.openWindowContainer(id)
         }
     }
-    val toggleBoard = { toggleWindow(BOARD_ID) }
+    // The board stands in the scene: opening it puts the talk away, and the 卷宗 window too.
+    val toggleBoard = {
+        Game.boardOpen = !Game.boardOpen
+        if (Game.boardOpen) {
+            Game.talk(null)
+            Game.window?.let { Game.closeWindow(it) }
+        }
+    }
     // Shown in the menu, so a device test can tell which build is on.
     val appVersion = remember { runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull().orEmpty() }
     val toggleFile = { toggleWindow(FILE_ID) }
@@ -123,7 +135,6 @@ fun CaseStage() {
             TableFinder.stop()
             subscription[0]?.cancel()
             AutoPilot.stepper = null
-            Game.closeWindow(BOARD_ID)
             Game.closeWindow(FILE_ID)
             Game.closeWindow = {}
         }
@@ -138,6 +149,12 @@ fun CaseStage() {
         }
         val observer = androidx.lifecycle.LifecycleEventObserver { _, e ->
             if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) music.resume() else if (e == androidx.lifecycle.Lifecycle.Event.ON_PAUSE) music.pause()
+            // Home pressed mid-narration: the voice stops with the game (device test 2026-11-12). ON_STOP, as a window of
+            // the game's own opening also pauses the stage.
+            if (e == androidx.lifecycle.Lifecycle.Event.ON_STOP) Game.stopSpeaking()
+            // Leaving the scene (Home, or the scene closed) must not leave the 卷宗 hanging in the room
+            // (2026-11-12 review: a clue panel stayed open after the main scene was gone).
+            if (e == androidx.lifecycle.Lifecycle.Event.ON_STOP) Game.window?.let { Game.closeWindow(it) }
         }
         lifecycle.addObserver(observer)
         onDispose {
@@ -155,6 +172,18 @@ fun CaseStage() {
                 .onSuccess { t.setFrame(id, it) }
                 .onFailure { Log.w(TAG, "frame $name: ${it.message}") }
         }
+    }
+
+    // The desk round the scene, once.
+    LaunchedEffect(table) {
+        val t = table ?: return@LaunchedEffect
+        val loaded = HashMap<String, Entity>()
+        for (name in Diorama.DESK.keys) {
+            runCatching { Entity.loadSuspend("asset://models/desk_$name.glb") }
+                .onSuccess { loaded[name] = it }
+                .onFailure { Log.w(TAG, "desk $name: ${it.message}") }
+        }
+        synchronized(Game.lock) { t.setDesk(loaded) }
     }
 
     // Load the case's miniature when the case changes (or restarts).
@@ -198,7 +227,22 @@ fun CaseStage() {
         }
         if (!faced) Log.w(TAG, "no head pose: the table stays at the room's front")
         val pose = headPose() ?: return@LaunchedEffect
+        // The table must sit where a table is for the player's own eyes: between 30 and 75 cm below them (device test
+        // 2026-11-12: a surface found high up, or a height left over, put the whole scene up in the air). Anything else
+        // is not taken; a height outside that is brought back to 42 cm below the eyes.
+        val eye = pose.position.y
+        val lo = eye - TABLE_BELOW_EYE_MAX
+        val hi = eye - TABLE_BELOW_EYE_MIN
+        if (eye > 0.6f && Game.tableHeight !in lo..hi) {
+            Log.i(TAG, "table height ${Game.tableHeight} is not for eyes at $eye: set to ${eye - TABLE_BELOW_EYE}")
+            Game.tableFound(eye - TABLE_BELOW_EYE)
+            t.placeInRoom(Game.tableHeight)
+        }
         TableFinder.find(pose.position.x, pose.position.z, t.facing)?.let { found ->
+            if (eye > 0.6f && found.height !in lo..hi) {
+                Log.i(TAG, "surface at ${found.height} m ignored: not a table for eyes at $eye")
+                return@let
+            }
             Log.i(TAG, "real table at ${found.height} m, ${found.distance} m ahead")
             Game.tableFound(found.height)
             t.placeInRoom(found.height, found.distance)
@@ -207,7 +251,8 @@ fun CaseStage() {
     LaunchedEffect(Game.hint, table) { table?.showHint(Game.hint) }
     LaunchedEffect(Game.toastVersion) {
         if (Game.toast.isEmpty()) return@LaunchedEffect
-        delay(5000)
+        // Time to notice it first, then read it (device test 2026-11-12: gone before it was even seen).
+        delay(14000)
         Game.clearToast()
     }
     LaunchedEffect(Game.note) {
@@ -227,25 +272,29 @@ fun CaseStage() {
         }
     }
     // Scene panels: one explanation at a time.
-    LaunchedEffect(Game.showTitle, Game.caseCardDismissed, Game.talkingTo, inspecting, Game.version, Game.coached, table) {
+    LaunchedEffect(Game.showTitle, Game.caseCardDismissed, Game.talkingTo, inspecting, Game.version, Game.coached, Game.boardOpen, table) {
         val t = table ?: return@LaunchedEffect
         val solved = Game.inv.solved
         val busy = Game.showTitle
         // Case closed: put down whatever is held up, so it doesn't hang in front of the verdict.
         if (solved && inspecting != null) putBack()
+        // Behind the scene, one sheet at a time: the board, else the talk, else the case card (or the
+        // result once solved); the coach line only while none of them is up.
+        val board = !busy && Game.boardOpen
         t.showPanel(PANEL_INTRO, busy)
-        t.showPanel(PANEL_CASE, !busy && !Game.caseCardDismissed && !solved)
-        t.showPanel(PANEL_TALK, !busy && Game.talkingTo != null)
+        t.showPanel(PANEL_BOARD, board)
+        t.showPanel(PANEL_CASE, !busy && !board && !Game.caseCardDismissed && !solved && Game.talkingTo == null)
+        t.showPanel(PANEL_TALK, !busy && !board && Game.talkingTo != null)
         t.showPanel(PANEL_INSPECT, !busy && inspecting != null && !solved)
-        t.showPanel(PANEL_RESULT, !busy && solved)
+        t.showPanel(PANEL_RESULT, !busy && !board && solved && Game.talkingTo == null)
         t.showPanel(PANEL_MENU, !busy)
         t.showPanel(PANEL_BOARD_TAB, !busy)
         t.showPanel(PANEL_TOAST, !busy && !solved)
-        t.showPanel(PANEL_COACH, !busy && !solved && Game.caseCardDismissed && !Game.coached && Game.talkingTo == null && inspecting == null)
+        t.showPanel(PANEL_COACH, !busy && !board && !solved && Game.caseCardDismissed && !Game.coached && Game.talkingTo == null && inspecting == null)
     }
     LaunchedEffect(Game.debugOpen) {
         when (Game.debugOpen ?: return@LaunchedEffect) {
-            "board" -> if (Game.window != BOARD_ID) toggleBoard()
+            "board" -> if (!Game.boardOpen) toggleBoard()
             "file" -> if (Game.window != FILE_ID) toggleFile()
         }
         Game.debugOpen = null
@@ -269,6 +318,7 @@ fun CaseStage() {
                     pinch[1] = 0
                     // A start while a drag is still open means its end never came: close it first.
                     if (t.dragging) release(t, "restart")
+                    lastHand[0] = handRotation(contentRef[0], value.inputDevicePose.rawRotation)
                     if (Game.showTitle) return@detectSpatialDragGesture
                     val g = t.grabOf(value.targetEntity)
                     val began = g?.let { synchronized(Game.lock) { t.begin(it, Game.inv) } }
@@ -303,7 +353,14 @@ fun CaseStage() {
                 lastInput[0] = SystemClock.uptimeMillis()
                 // Compose y points down; space y points up.
                 val d = Vec3(meters(value.dragAmount.x), -meters(value.dragAmount.y), meters(value.dragAmount.z))
-                synchronized(Game.lock) { t.drag(d) }
+                // The hand's own turn since the last move (a prop held up close turns with it).
+                val now = handRotation(contentRef[0], value.inputDevicePose.rawRotation)
+                val before = lastHand[0]
+                lastHand[0] = now
+                synchronized(Game.lock) {
+                    t.drag(d)
+                    if (now != null && before != null) t.turnByHand(now.times(before.conjugate()))
+                }
             }
         },
         attachments = {
@@ -322,6 +379,7 @@ fun CaseStage() {
             AttachmentPanel(PANEL_RESULT) { ResultPanel(converter) }
             AttachmentPanel(PANEL_BOARD_TAB) { BoardTab(converter, toggleBoard) }
             AttachmentPanel(PANEL_COACH) { CoachPanel(converter) }
+            AttachmentPanel(PANEL_BOARD) { BoardPanel(converter) { Game.boardOpen = false } }
             AttachmentPanel(PANEL_MENU) {
                 MenuPanel(
                     converter,
@@ -335,6 +393,7 @@ fun CaseStage() {
         },
         update = { _, attachments -> table?.let { attachPanels(it, attachments) } },
         initial = { content, attachments ->
+            contentRef[0] = content
             // A desk lamp from the upper left, and a cool fill from the right.
             content.addEntity(Entity().apply {
                 components.set(DirectionalLightComponent(Color(0xFFFFE2B8).toColor4(), 900f, false))
@@ -376,30 +435,44 @@ fun CaseStage() {
 }
 
 /** Scene panels, placed in the table's frame (+z toward the player). */
-private val PANEL_FRAMES = mapOf(PANEL_INTRO to "panel_intro", PANEL_CASE to "panel_case", PANEL_TALK to "panel_talk", PANEL_RESULT to "panel_result")
+private val PANEL_FRAMES = mapOf(PANEL_INTRO to "panel_intro", PANEL_CASE to "panel_case", PANEL_TALK to "panel_talk", PANEL_RESULT to "panel_result", PANEL_BOARD to "panel_board")
 
 private fun attachPanels(t: Diorama, attachments: SpatialViewAttachments) {
     fun put(id: String, pos: Vector3) {
         if (!t.hasPanel(id)) t.attachPanel(id, attachments.entity(id), pos)
     }
-    put(PANEL_INTRO, Vector3(0f, 0.5f, -0.15f))
-    // The case card on the left, questioning on the right, so the scene itself stays in view.
-    put(PANEL_CASE, Vector3(-0.5f, 0.3f, -0.02f))
-    put(PANEL_TALK, Vector3(0.5f, 0.3f, -0.02f))
-    // Beside the thing held up close (it floats at Diorama.INSPECT_AT).
-    put(PANEL_INSPECT, Vector3(0.26f, 0.24f, 0.17f))
-    put(PANEL_TOAST, Vector3(0f, 0.5f, -0.12f))
-    put(PANEL_RESULT, Vector3(0f, 0.45f, -0.05f))
-    put(PANEL_COACH, Vector3(0f, 0.36f, 0.08f))
+    // Everything to read stands in one place: upright behind the miniature, straight ahead at eye
+    // height (2026-11-10 review: text placed around the models had to be read sideways, and some
+    // panels cut into them). Nothing stands inside the scene's own space (|x| < 0.32, z -0.2..0.2,
+    // up to 0.3 m), and the sheets keep clear of the back wall's top as seen from the seat.
+    put(PANEL_INTRO, READ_AT)
+    put(PANEL_BOARD, Vector3(0f, 0.49f, -0.44f))
+    put(PANEL_CASE, READ_AT)
+    put(PANEL_TALK, Vector3(0f, 0.5f, -0.4f))
+    put(PANEL_RESULT, READ_AT)
+    put(PANEL_COACH, Vector3(0f, 0.36f, -0.4f))
+    // Just above the thing held up close (it floats at Diorama.INSPECT_AT, in the middle).
+    put(PANEL_INSPECT, Vector3(0f, 0.385f, 0.15f))
+    // New clues and answers: a strip over the middle of the table, 18 cm further away and higher than before (device test
+    // 2026-11-12: just above the front edge it was too close to notice or read). It only stays a while, so it may stand
+    // in the middle of the view.
+    put(PANEL_TOAST, Vector3(0f, 0.36f, 0.12f))
     put(PANEL_BOARD_TAB, Vector3(0.36f, 0.04f, 0.17f))
     put(PANEL_MENU, MENU_POS)
 }
+
+/** Where the case card, the result and the title stand: behind the miniature, at eye height. */
+private val READ_AT = Vector3(0f, 0.46f, -0.4f)
 
 /** The menu tab at the table's front left, and where the unfolded menu stands so all of it is above the table. */
 private val MENU_POS = Vector3(-0.38f, 0.04f, 0.17f)
 private val MENU_OPEN_POS = Vector3(-0.42f, 0.34f, 0.12f)
 
 private const val TAG = "CaseStage"
+/** A table top for the player's eyes: this far below them at most, at least, and by default. */
+private const val TABLE_BELOW_EYE_MAX = 0.75f
+private const val TABLE_BELOW_EYE_MIN = 0.3f
+private const val TABLE_BELOW_EYE = 0.42f
 /** Logcat tag for every pinch the stage sees (kept in release builds, for on-device reports). */
 private const val INPUT_TAG = "CaseInput"
 /** A drag with no callback for this long is taken as released. */
@@ -409,6 +482,14 @@ private const val PINCH_HELD = 0.5f
 /** Below this the fingers have parted; it must hold for a few frames (tracking jitters). */
 private const val PINCH_OPEN = 0.3f
 private const val PINCH_OPEN_FRAMES = 3
+
+/** The pinching hand's orientation in the content's frame, or null when none comes (gaze without a hand). */
+private fun handRotation(content: SpatialViewContent?, raw: com.pico.spatial.ui.foundation.geometry.Rotation3D?): Quat? {
+    if (content == null || raw == null) return null
+    val q = runCatching { content.convertRotation(raw.toQuaternion(), ViewCoordinateSpace.Global, content.localSpatialCoordinateSpace) }.getOrNull() ?: return null
+    val n = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w
+    return q.takeIf { n > 0.5f && !(q.x == 0f && q.y == 0f && q.z == 0f) }
+}
 
 private fun latestHands(hands: HandTrackingProvider): HandTrackingData? =
     runCatching { if (hands.state == DataProvider.State.STARTED) hands.latestData else null }.getOrNull()

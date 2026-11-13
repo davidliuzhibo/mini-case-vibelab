@@ -41,7 +41,6 @@ import com.pico.spatial.ui.design.Button
 import com.pico.spatial.ui.design.Text
 import com.pico.spatial.ui.platform.LengthUnit
 import com.pico.spatial.ui.platform.PhysicalLengthConverter
-import com.vrgames.minicase.BOARD_ID
 import com.vrgames.minicase.FILE_ID
 import com.vrgames.minicase.core.Cases
 import com.vrgames.minicase.core.Investigation
@@ -57,6 +56,7 @@ const val PANEL_RESULT = "result"
 const val PANEL_MENU = "menu"
 const val PANEL_BOARD_TAB = "board_tab"
 const val PANEL_COACH = "coach"
+const val PANEL_BOARD = "board"
 
 /** Text height in the scene, so the panels read at arm's length to about 1.5 m. */
 private const val TEXT_METERS = 0.02f
@@ -255,7 +255,7 @@ fun InspectPanel(converter: PhysicalLengthConverter, name: String?, hidden: Stri
     SceneCard(converter, 0.36f) {
         Text(name, fontSize = converter.sz(0.024f), color = Brass)
         Text(
-            if (hidden != null) "捏住它转一转，把$hidden 转过来对着自己看看。" else "捏住它可以转动，看看每一面。",
+            if (hidden != null) "捏住它，像拿在手里一样转动手腕或拖动，把$hidden 转过来对着自己看看。" else "捏住它转动手腕或拖动，看看每一面。",
             fontSize = converter.sz(0.017f), color = LabelInk,
         )
         PinchLine("放回原处", Dim, converter, onPinch = putBack)
@@ -315,7 +315,7 @@ fun CoachPanel(converter: PhysicalLengthConverter) =
 @Composable
 fun BoardTab(converter: PhysicalLengthConverter, toggle: () -> Unit) {
     @Suppress("UNUSED_VARIABLE") val v = Game.version
-    val text = if (Game.window == BOARD_ID) "收起案情板" else "案情板（${Game.inv.found.size} 条线索）"
+    val text = if (Game.boardOpen) "收起案情板" else "案情板（${Game.inv.found.size} 条线索）"
     PinchLine(text, Brass, converter, onPinch = toggle)
 }
 
@@ -339,7 +339,7 @@ fun MenuPanel(
     SceneCard(converter, 0.42f, Dim) {
         if (next != null) PinchLine("进入下一案：${next.title} →", Brass, converter) { Game.nextCase(); Game.menuOpen = false }
         PinchLine("给点提示", Brass, converter) { Game.askHint(); Game.menuOpen = false }
-        val board = if (Game.window == BOARD_ID) "收起案情板" else "案情板：线索、推理、指认"
+        val board = if (Game.boardOpen) "收起案情板" else "案情板：线索、推理、指认"
         val file = if (Game.window == FILE_ID) "收起卷宗" else "卷宗：案件、人物、设置"
         PinchLine(board, Brass, converter) { toggleBoard(); Game.menuOpen = false }
         PinchLine(file, Brass, converter) { toggleFile(); Game.menuOpen = false }
