@@ -1,0 +1,1 @@
+boots,combbox,crownbox,fig_ge,fig_huo,fig_ma,fig_yun,fig_zhong,guazi,huaigu,jinghu,kuitou,ledger,playbill,qinbox,scene_opera

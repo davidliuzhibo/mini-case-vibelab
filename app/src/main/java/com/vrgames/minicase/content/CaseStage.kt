@@ -37,9 +37,14 @@ import com.pico.spatial.ui.foundation.gesture.detectSpatialDragGesture
 import com.pico.spatial.ui.platform.LengthUnit
 import com.pico.spatial.ui.platform.LocalPhysicalLengthConverter
 import com.pico.spatial.ui.platform.containers.LocalSpatialNavigator
+import com.vrgames.minicase.ALL_WINDOWS
+import com.vrgames.minicase.CABINET_ID
 import com.vrgames.minicase.FILE_ID
+import com.vrgames.minicase.PEOPLE_ID
+import com.vrgames.minicase.platform.AppExit
 import com.vrgames.minicase.core.Action
 import com.vrgames.minicase.core.Cases
+import com.vrgames.minicase.core.InspectLayout
 import com.vrgames.minicase.core.Investigation
 import com.vrgames.minicase.core.Vec3
 import com.vrgames.minicase.game.AutoPilot
@@ -50,6 +55,7 @@ import com.vrgames.minicase.render.Sfx
 import com.vrgames.minicase.render.Sound
 import com.vrgames.minicase.render.TableFinder
 import com.vrgames.minicase.render.setPos
+import com.vrgames.minicase.render.toVector3
 import com.vrgames.minicase.render.transform
 import kotlinx.coroutines.delay
 
@@ -84,21 +90,25 @@ fun CaseStage() {
         val pose = headPose()
         val f = pose?.rotation?.rotateVector(Vector3(0f, 0f, -1f))
         // Looking straight down or up gives no heading to go by.
-        if (t == null || pose == null || f == null || kotlin.math.hypot(f.x, f.z) < 0.2f) {
+        if (t == null || pose == null || f == null || kotlin.math.hypot(f.x, f.z) < 0.2f ||
+            !com.vrgames.minicase.core.EyeHeight.valid(pose.position.x, pose.position.y, pose.position.z)) {
             false
         } else {
             val yaw = Math.toDegrees(kotlin.math.atan2(-f.x, -f.z).toDouble()).toFloat()
             t.faceFrom(pose.position.x, pose.position.z, yaw)
+            // v0.9.1: the height is NOT taken from this first pose (on the device it can still be all zeros right
+            // after tracking starts: 0.9.0 put the table near the floor). The EyeHeight loop below sets it.
             t.placeInRoom(Game.tableHeight)
             Log.i(TAG, "table faces the player at (${pose.position.x}, ${pose.position.z}), yaw $yaw")
             true
         }
     }
-    // One window at a time, each a toggle: opening a window that is already open starts a second copy.
+    // Each window a toggle; several may be up at once, each beside the table (contest round 2026-11-15).
+    // Opening a window that is already open would start a second copy.
     val toggleWindow: (String) -> Unit = { id ->
-        val shown = Game.window
-        if (shown != null) Game.closeWindow(shown)
-        if (shown != id) {
+        if (Game.isOpen(id)) {
+            Game.closeWindow(id)
+        } else {
             Game.windowShown(id)
             navigator.openWindowContainer(id)
         }
@@ -108,7 +118,6 @@ fun CaseStage() {
         Game.boardOpen = !Game.boardOpen
         if (Game.boardOpen) {
             Game.talk(null)
-            Game.window?.let { Game.closeWindow(it) }
         }
     }
     // Shown in the menu, so a device test can tell which build is on.
@@ -119,8 +128,10 @@ fun CaseStage() {
         inspecting = null
     }
 
+    com.vrgames.minicase.platform.AppExit.TrackStage()
     DisposableEffect(Unit) {
         Game.init(context)
+        AppExit.stageAlive = true
         Game.closeWindow = { id ->
             navigator.closeWindowContainer(id)
             Game.windowGone(id)
@@ -135,7 +146,12 @@ fun CaseStage() {
             TableFinder.stop()
             subscription[0]?.cancel()
             AutoPilot.stepper = null
-            Game.closeWindow(FILE_ID)
+            AutoPilot.picker = null
+            AutoPilot.rays = null
+            AutoPilot.putBack = null
+            AppExit.stageAlive = false
+            Game.openWindows.forEach { Game.closeWindow(it) }
+            for (id in ALL_WINDOWS) Game.closeWindow(id)
             Game.closeWindow = {}
         }
     }
@@ -154,7 +170,7 @@ fun CaseStage() {
             if (e == androidx.lifecycle.Lifecycle.Event.ON_STOP) Game.stopSpeaking()
             // Leaving the scene (Home, or the scene closed) must not leave the 卷宗 hanging in the room
             // (2026-11-12 review: a clue panel stayed open after the main scene was gone).
-            if (e == androidx.lifecycle.Lifecycle.Event.ON_STOP) Game.window?.let { Game.closeWindow(it) }
+            if (e == androidx.lifecycle.Lifecycle.Event.ON_STOP) Game.openWindows.forEach { Game.closeWindow(it) }
         }
         lifecycle.addObserver(observer)
         onDispose {
@@ -217,7 +233,7 @@ fun CaseStage() {
     }
     // The room's -z is wherever the headset was last recentered: once the head pose is in, set the
     // table in front of the player; then look for a real table to stand it on.
-    LaunchedEffect(table) {
+    LaunchedEffect(table, Game.placeRequest) {
         val t = table ?: return@LaunchedEffect
         var faced = false
         repeat(30) {
@@ -226,26 +242,34 @@ fun CaseStage() {
             delay(100)
         }
         if (!faced) Log.w(TAG, "no head pose: the table stays at the room's front")
-        val pose = headPose() ?: return@LaunchedEffect
-        // The table must sit where a table is for the player's own eyes: between 30 and 75 cm below them (device test
-        // 2026-11-12: a surface found high up, or a height left over, put the whole scene up in the air). Anything else
-        // is not taken; a height outside that is brought back to 42 cm below the eyes.
-        val eye = pose.position.y
-        val lo = eye - TABLE_BELOW_EYE_MAX
-        val hi = eye - TABLE_BELOW_EYE_MIN
-        if (eye > 0.6f && Game.tableHeight !in lo..hi) {
-            Log.i(TAG, "table height ${Game.tableHeight} is not for eyes at $eye: set to ${eye - TABLE_BELOW_EYE}")
-            Game.tableFound(eye - TABLE_BELOW_EYE)
-            t.placeInRoom(Game.tableHeight)
-        }
-        TableFinder.find(pose.position.x, pose.position.z, t.facing)?.let { found ->
-            if (eye > 0.6f && found.height !in lo..hi) {
-                Log.i(TAG, "surface at ${found.height} m ignored: not a table for eyes at $eye")
-                return@let
+        // v0.9.1 (device 2026-11-19: 0.9.0 put the table almost on the floor): the eye height comes from EyeHeight, which
+        // ignores the all-zero and out-of-range poses a headset reports while tracking starts, waits for steady readings,
+        // falls back to a seated eye after 4 s and corrects once if a real reading comes later.
+        val eyes = com.vrgames.minicase.core.EyeHeight()
+        var looked = false
+        val step = 50L
+        val zeroUntil = android.os.SystemClock.uptimeMillis() + (Game.debugZeroHeadS * 1000).toLong()
+        while (true) {
+            // Debug only: a headset that reports all-zero poses for a while after start (as seen on the device).
+            val p = if (android.os.SystemClock.uptimeMillis() < zeroUntil) null else headPose()
+            val zero = android.os.SystemClock.uptimeMillis() < zeroUntil
+            val got = if (zero) eyes.feed(0f, 0f, 0f, step / 1000.0) else eyes.feed(p?.position?.x, p?.position?.y, p?.position?.z, step / 1000.0)
+            if (got) {
+                val eye = eyes.value!!
+                Game.fromEye(eye)
+                t.placeInRoom(Game.tableHeight)
+                Log.i(TAG, "table top at ${Game.tableHeight} for eyes at $eye (${if (eyes.guessed) "fallback" else "measured"}, adjust ${Game.tableAdjust})")
+                // A real table found ahead only moves the scene nearer or farther, never up or down.
+                if (!looked && p != null && !eyes.guessed) {
+                    looked = true
+                    TableFinder.find(p.position.x, p.position.z, t.facing)?.let { found ->
+                        Log.i(TAG, "real surface at ${found.height} m, ${found.distance} m ahead: distance taken, height kept")
+                        t.placeInRoom(Game.tableHeight, found.distance)
+                    }
+                }
             }
-            Log.i(TAG, "real table at ${found.height} m, ${found.distance} m ahead")
-            Game.tableFound(found.height)
-            t.placeInRoom(found.height, found.distance)
+            if (!eyes.listening) break
+            delay(step)
         }
     }
     LaunchedEffect(Game.hint, table) { table?.showHint(Game.hint) }
@@ -288,18 +312,26 @@ fun CaseStage() {
         t.showPanel(PANEL_INSPECT, !busy && inspecting != null && !solved)
         t.showPanel(PANEL_RESULT, !busy && !board && solved && Game.talkingTo == null)
         t.showPanel(PANEL_MENU, !busy)
-        t.showPanel(PANEL_BOARD_TAB, !busy)
+        // 0.9.2: while an item is held the item box sits to its right and could cover the tab from a high, close seat.
+        t.showPanel(PANEL_BOARD_TAB, !busy && inspecting == null)
         t.showPanel(PANEL_TOAST, !busy && !solved)
         t.showPanel(PANEL_COACH, !busy && !board && !solved && Game.caseCardDismissed && !Game.coached && Game.talkingTo == null && inspecting == null)
     }
     LaunchedEffect(Game.debugOpen) {
         when (Game.debugOpen ?: return@LaunchedEffect) {
             "board" -> if (!Game.boardOpen) toggleBoard()
-            "file" -> if (Game.window != FILE_ID) toggleFile()
+            "file" -> if (!Game.isOpen(FILE_ID)) toggleFile()
+            "people" -> if (!Game.isOpen(PEOPLE_ID)) toggleWindow(PEOPLE_ID)
+            "cabinet" -> if (!Game.isOpen(CABINET_ID)) toggleWindow(CABINET_ID)
         }
         Game.debugOpen = null
     }
     LaunchedEffect(Game.menuOpen, table) { table?.placePanel(PANEL_MENU, if (Game.menuOpen) MENU_OPEN_POS else MENU_POS) }
+    // v0.9.2: while something is held the clue box stands higher and further back, clear above the thing and its item
+    // box (since 0.6.1 it stood 3 cm behind the item box, and a clue found on pick-up was hidden behind it).
+    LaunchedEffect(inspecting, table) {
+        table?.placePanel(PANEL_TOAST, (if (inspecting != null) InspectLayout.CLUE_HOLDING_AT else InspectLayout.CLUE_AT).toVector3())
+    }
 
     SpatialView(
         Modifier.pointerInput(Unit) {
@@ -371,11 +403,12 @@ fun CaseStage() {
                 val id = inspecting
                 @Suppress("UNUSED_VARIABLE") val v = Game.version
                 // The case can change before the load effect clears [inspecting]: look the prop up softly.
-                val name = id?.let { i -> Game.inv.case.props.firstOrNull { it.id == i }?.name }
-                val hidden = table?.inspectingHidden(Game.inv)?.label
-                InspectPanel(converter, name, hidden, putBack)
+                val prop = id?.let { i -> Game.inv.case.props.firstOrNull { it.id == i } }
+                // v0.9.2: the turning nudge only while a hidden side still hides its clue; otherwise one plain line.
+                val line = prop?.let { InspectLayout.itemLine(it, table?.inspectingHidden(Game.inv)) }
+                InspectPanel(converter, prop?.name, line, putBack)
             }
-            AttachmentPanel(PANEL_TOAST) { ToastPanel(converter) }
+            AttachmentPanel(PANEL_TOAST) { ToastPanel(converter, holding = inspecting != null) }
             AttachmentPanel(PANEL_RESULT) { ResultPanel(converter) }
             AttachmentPanel(PANEL_BOARD_TAB) { BoardTab(converter, toggleBoard) }
             AttachmentPanel(PANEL_COACH) { CoachPanel(converter) }
@@ -385,8 +418,12 @@ fun CaseStage() {
                     converter,
                     toggleBoard = toggleBoard,
                     toggleFile = toggleFile,
+                    toggleWindow = toggleWindow,
                     faceMe = { facePlayer() },
-                    quit = { context.findActivity()?.finishAndRemoveTask() },
+                    quit = {
+                        for (id in ALL_WINDOWS) Game.closeWindow(id)
+                        AppExit.finishAll(context)
+                    },
                     version = appVersion,
                 )
             }
@@ -405,14 +442,20 @@ fun CaseStage() {
             content.addEntity(t.root)
             attachPanels(t, attachments)
             Game.sound = Sound(t.root).also { it.load() }
+            Game.voice = com.vrgames.minicase.render.Voice(t.root)
+            Game.figureAt = { id -> t.figurePos(id) }
             t.onHiddenSeen = { id -> main.post { Game.handled(id, sawHidden = true) } }
             table = t
 
             AutoPilot.stepper = { autoStep(t) { inspecting = it } }
+            AutoPilot.picker = { spec -> autoPickNamed(t, spec) { inspecting = it } }
+            AutoPilot.putBack = { putBack(); Log.i("CaseTest", "put back, holding ${t.inspecting}") }
+            AutoPilot.rays = { castRays(t) }
 
             subscription[0] = content.subscribe(SceneEvents.Update::class.java) { e ->
                 headPose()?.let { p -> t.viewer = t.toTable(p.position.x, p.position.y, p.position.z) }
                 synchronized(Game.lock) { t.frame(e.deltaTime.toDouble()) }
+                if (Game.speaking != null && Game.voice?.finished() == true) main.post { Game.stopSpeaking() }
                 // A pinched hand never holds perfectly still, so a drag that has been silent this
                 // long has lost its end (hand tracking dropped the release): treat it as let go.
                 if (t.dragging && lastInput[0] > 0 && SystemClock.uptimeMillis() - lastInput[0] > STUCK_DRAG_MS) {
@@ -451,12 +494,13 @@ private fun attachPanels(t: Diorama, attachments: SpatialViewAttachments) {
     put(PANEL_TALK, Vector3(0f, 0.5f, -0.4f))
     put(PANEL_RESULT, READ_AT)
     put(PANEL_COACH, Vector3(0f, 0.36f, -0.4f))
-    // Just above the thing held up close (it floats at Diorama.INSPECT_AT, in the middle).
-    put(PANEL_INSPECT, Vector3(0f, 0.385f, 0.15f))
+    // v0.9.2: to the right of the thing held up close (it floats at InspectLayout.ITEM_AT, left of the middle); until
+    // 0.9.1 it stood right above the thing, and the thing's grown pinch box reached its 放回原处.
+    put(PANEL_INSPECT, InspectLayout.ITEM_BOX_AT.toVector3())
     // New clues and answers: a strip over the middle of the table, 18 cm further away and higher than before (device test
     // 2026-11-12: just above the front edge it was too close to notice or read). It only stays a while, so it may stand
-    // in the middle of the view.
-    put(PANEL_TOAST, Vector3(0f, 0.36f, 0.12f))
+    // in the middle of the view. While something is held it moves up and back (InspectLayout.CLUE_HOLDING_AT).
+    put(PANEL_TOAST, InspectLayout.CLUE_AT.toVector3())
     put(PANEL_BOARD_TAB, Vector3(0.36f, 0.04f, 0.17f))
     put(PANEL_MENU, MENU_POS)
 }
@@ -518,6 +562,77 @@ private fun release(t: Diorama?, why: String) {
         Game.sound?.play(if (p.action == Action.LIFT) Sfx.LIFT else Sfx.OPEN)
         Game.handled(r.prop)
     }
+}
+
+/**
+ * Test hook `pick --es id <prop>[,turn]`: picks up [spec]'s prop on the table as a pinch would (opening what it is in
+ * first), so its clue shows if looking is enough; ",turn" also turns it to its hidden side and counts that as found.
+ */
+private fun autoPickNamed(t: Diorama, spec: String, setInspecting: (String?) -> Unit) {
+    val turned = spec.endsWith(",turn")
+    val id = spec.removeSuffix(",turn").trim()
+    if (Game.showTitle) Game.start()
+    Game.caseCardDismissed = true
+    val p = Game.inv.case.props.firstOrNull { it.id == id && it.action == Action.EXAMINE }
+    if (p == null) {
+        Log.w("CaseTest", "pick: no thing to pick up called '$id' in case ${Game.caseId}")
+        return
+    }
+    fun openFor(propId: String) {
+        for (n in Game.inv.case.prop(propId).needs) {
+            if (n in Game.inv.opened) continue
+            openFor(n)
+            t.autoOpen(n)
+            Game.handled(n)
+        }
+    }
+    openFor(p.id)
+    Game.talk(null)
+    synchronized(Game.lock) { t.autoPick(p.id, turned) }
+    setInspecting(p.id)
+    Game.sound?.play(Sfx.PICK)
+    if (p.hiddenSide == null) Game.handled(p.id) else if (turned) Game.handled(p.id, sawHidden = true)
+    val line = InspectLayout.itemLine(p, t.inspectingHidden(Game.inv))
+    Log.i("CaseTest", "picked ${p.id} hidden=${p.hiddenSide} line=「$line」 clue=${Game.toast.map { it.title }}")
+}
+
+/**
+ * Test hook `rays`: from the eyes (headset pose, table frame) to 9 points on the item box's 放回原处 and to the held
+ * thing's middle, the first thing each ray hits (all hits, nearest first). Cast twice: relative to the table root, and in
+ * the room frame as a cross-check.
+ */
+private fun castRays(t: Diorama) {
+    val held = t.inspecting
+    val sc = t.root.scene
+    if (sc == null) {
+        Log.w("CaseTest", "rays: the table is not in a scene")
+        return
+    }
+    val eye = t.viewer
+    Log.i("CaseTest", "rays from eye (%.3f, %.3f, %.3f) table frame, holding $held".format(eye.x, eye.y, eye.z))
+    val group = com.pico.spatial.core.ecs.simulation.CollisionGroup(com.pico.spatial.core.ecs.simulation.CollisionGroup.COLLISION_GROUP_ALL)
+    val all = com.pico.spatial.core.ecs.simulation.CollisionCastHitMode.ALL
+    val targets = InspectLayout.buttonPoints(InspectLayout.BUTTON).mapIndexed { i, p -> "button${i + 1}" to p } + listOf("item" to (t.heldCentre() ?: InspectLayout.ITEM_AT))
+    var bad = 0
+    for ((name, p) in targets) {
+        val d = p - eye
+        val len = d.length()
+        val dir = d.normalized()
+        val rel = runCatching { sc.rayCast(eye.toVector3(), dir.toVector3(), (len + 0.5).toFloat(), all, group, t.root).results.sortedBy { it.distance } }
+            .onFailure { Log.w("CaseTest", "ray $name relative: ${it.message}") }.getOrNull()
+        val o = t.toRoom(eye)
+        val dr = t.toRoom(eye + dir) - o
+        val room = runCatching { sc.rayCast(o.toVector3(), dr.toVector3(), (len + 0.5).toFloat(), all, group, null).results.sortedBy { it.distance } }
+            .onFailure { Log.w("CaseTest", "ray $name room: ${it.message}") }.getOrNull()
+        val first = rel?.firstOrNull()
+        val what = t.describe(first?.entity)
+        if (name.startsWith("button") && held != null && what == "prop:$held") bad++
+        Log.i(
+            "CaseTest",
+            "ray $name: first $what at %.3f of %.3f m, ${rel?.size} hits [${rel?.take(4)?.joinToString { t.describe(it.entity) }}]; room frame first ${t.describe(room?.firstOrNull()?.entity)}".format(first?.distance ?: -1f, len),
+        )
+    }
+    Log.i("CaseTest", "rays done: $bad of 9 button rays hit the held thing first")
 }
 
 /** AutoPilot: one step of the hints, carried out in the scene. False once the case is closed. */

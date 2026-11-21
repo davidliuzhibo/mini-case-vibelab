@@ -14,8 +14,8 @@ android {
         applicationId = "com.vrgames.minicase"
         minSdk = 35
         targetSdk = 35
-        versionCode = 10
-        versionName = "0.6.3"
+        versionCode = 15
+        versionName = "0.9.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters.add("arm64-v8a") }
@@ -35,6 +35,11 @@ android {
     } else null
 
     buildTypes {
+        // Debug builds are shrunk too: the emulator sits behind a slow tunnel.
+        debug {
+            isMinifyEnabled = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
         release {
             signingConfig = releaseSigning
             isMinifyEnabled = false

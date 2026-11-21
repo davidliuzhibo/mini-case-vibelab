@@ -43,6 +43,7 @@ import com.pico.spatial.ui.platform.LengthUnit
 import com.pico.spatial.ui.platform.PhysicalLengthConverter
 import com.vrgames.minicase.FILE_ID
 import com.vrgames.minicase.core.Cases
+import com.vrgames.minicase.core.InspectLayout
 import com.vrgames.minicase.core.Investigation
 import com.vrgames.minicase.game.Game
 
@@ -75,9 +76,9 @@ val WindowBg = Color(0xF2151A22)
  * on screen, so a window the system closes does not count as open.
  */
 @Composable
-fun WindowHeader(id: String, title: String, color: Color, size: TextUnit) {
+fun WindowHeader(id: String, title: String, color: Color, size: TextUnit, register: Boolean = true) {
     val copy = remember { Any() }
-    DisposableEffect(copy) {
+    if (register) DisposableEffect(copy) {
         Game.windowShown(id, copy)
         onDispose { Game.windowGone(id, copy) }
     }
@@ -248,29 +249,40 @@ fun TalkPanel(converter: PhysicalLengthConverter) {
     }
 }
 
-/** Under the thing held up close: what it is, a nudge to turn it, and "put back". */
+/**
+ * The item box, to the right of the thing held up close: its name, one line ([InspectLayout.itemLine]: the turning nudge
+ * while a hidden side still hides its clue, otherwise what the thing is), and 放回原处 at the bottom left. v0.9.2: a fixed
+ * [InspectLayout.ITEM_BOX_W] × [InspectLayout.ITEM_BOX_H] so the button is where the layout check expects it.
+ */
 @Composable
-fun InspectPanel(converter: PhysicalLengthConverter, name: String?, hidden: String?, putBack: () -> Unit) {
+fun InspectPanel(converter: PhysicalLengthConverter, name: String?, line: String?, putBack: () -> Unit) {
     if (name == null) return
-    SceneCard(converter, 0.36f) {
-        Text(name, fontSize = converter.sz(0.024f), color = Brass)
-        Text(
-            if (hidden != null) "捏住它，像拿在手里一样转动手腕或拖动，把$hidden 转过来对着自己看看。" else "捏住它转动手腕或拖动，看看每一面。",
-            fontSize = converter.sz(0.017f), color = LabelInk,
-        )
-        PinchLine("放回原处", Dim, converter, onPinch = putBack)
+    val shape = RoundedCornerShape(converter.m(0.02f))
+    Column(
+        Modifier.width(converter.m(InspectLayout.ITEM_BOX_W.toFloat())).height(converter.m(InspectLayout.ITEM_BOX_H.toFloat()))
+            .clip(shape).background(Panel).border(converter.m(0.002f), Brass, shape)
+            .padding(horizontal = converter.m(InspectLayout.ITEM_BOX_PAD_X.toFloat()), vertical = converter.m(InspectLayout.ITEM_BOX_PAD_Y.toFloat())),
+        verticalArrangement = Arrangement.spacedBy(converter.m(0.006f)),
+    ) {
+        Text(name, fontSize = converter.sz(0.022f), color = Brass, maxLines = 1)
+        Text(line.orEmpty(), fontSize = converter.sz(0.016f), color = LabelInk, maxLines = 2)
+        Spacer(Modifier.weight(1f))
+        PinchLine("放回原处", Brass, converter, maxWidth = InspectLayout.BUTTON_W.toFloat() + 0.02f, onPinch = putBack)
     }
 }
 
-/** "New clue" for a moment over the scene, and the current hint. */
+/**
+ * "New clue" for a moment over the scene, and the current hint. v0.9.2: while something is [holding] held up close, a
+ * new clue shows without the hint line, so the box stays under [InspectLayout.CLUE_MAX_H] and clear of the thing.
+ */
 @Composable
-fun ToastPanel(converter: PhysicalLengthConverter) {
+fun ToastPanel(converter: PhysicalLengthConverter, holding: Boolean = false) {
     @Suppress("UNUSED_VARIABLE") val tv = Game.toastVersion
     val clues = Game.toast
-    val hint = Game.hint
+    val hint = Game.hint.takeIf { !(holding && clues.isNotEmpty()) }
     val note = Game.note
     if (clues.isEmpty() && hint == null && note == null) return
-    SceneCard(converter, 0.46f) {
+    SceneCard(converter, InspectLayout.CLUE_W.toFloat()) {
         note?.let { Text(it, fontSize = converter.sz(0.02f), color = LabelInk) }
         for (c in clues) {
             Text("新${c.kind.label}：${c.title}", fontSize = converter.sz(0.022f), color = Brass)
@@ -301,7 +313,7 @@ fun ResultPanel(converter: PhysicalLengthConverter) {
         Text(inv.case.truth, fontSize = converter.sz(0.017f), color = PaperInk)
         Text("找到线索 ${inv.found.size} / ${inv.case.clues.size}　用了提示 ${inv.hintsUsed} 次　指认错 ${inv.wrongAccusations} 次", fontSize = converter.sz(0.015f), color = PaperDim)
         if (next != null) PinchLine("下一案：${next.title} →", Brass, converter) { Game.nextCase() }
-        else Text("三个案子全部告破。谢谢你，探长。", fontSize = converter.sz(0.02f), color = PaperTitle)
+        else Text("四个案子全部告破。谢谢你，探长。", fontSize = converter.sz(0.02f), color = PaperTitle)
         PinchLine("从头再查一遍", Dim, converter) { Game.restartCase() }
     }
 }
@@ -325,6 +337,7 @@ fun MenuPanel(
     converter: PhysicalLengthConverter,
     toggleBoard: () -> Unit,
     toggleFile: () -> Unit,
+    toggleWindow: (String) -> Unit,
     faceMe: () -> Unit,
     quit: () -> Unit,
     version: String,
@@ -340,9 +353,11 @@ fun MenuPanel(
         if (next != null) PinchLine("进入下一案：${next.title} →", Brass, converter) { Game.nextCase(); Game.menuOpen = false }
         PinchLine("给点提示", Brass, converter) { Game.askHint(); Game.menuOpen = false }
         val board = if (Game.boardOpen) "收起案情板" else "案情板：线索、推理、指认"
-        val file = if (Game.window == FILE_ID) "收起卷宗" else "卷宗：案件、人物、设置"
+        val file = if (Game.isOpen(FILE_ID)) "收起卷宗" else "卷宗：案件、设置"
         PinchLine(board, Brass, converter) { toggleBoard(); Game.menuOpen = false }
         PinchLine(file, Brass, converter) { toggleFile(); Game.menuOpen = false }
+        PinchLine(if (Game.isOpen(com.vrgames.minicase.PEOPLE_ID)) "收起人物档案" else "人物档案：谁说了什么", Brass, converter) { toggleWindow(com.vrgames.minicase.PEOPLE_ID); Game.menuOpen = false }
+        PinchLine(if (Game.isOpen(com.vrgames.minicase.CABINET_ID)) "收起证物柜" else "证物柜：找到的证物，拿起来转着看", Brass, converter) { toggleWindow(com.vrgames.minicase.CABINET_ID); Game.menuOpen = false }
         PinchLine("把案发现场摆到我正前方", Brass, converter) { faceMe(); Game.menuOpen = false }
         PinchLine("这个案子从头再查", Dim, converter) { Game.restartCase(); Game.menuOpen = false }
         Text("进度自动保存。版本 $version", fontSize = converter.sz(0.015f), color = Dim)

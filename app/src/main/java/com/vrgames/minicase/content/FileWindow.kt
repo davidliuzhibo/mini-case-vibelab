@@ -22,6 +22,7 @@ import com.vrgames.minicase.game.Game
 /** 卷宗: the cases (pick one), the case at hand with its people, a hint, and the table settings. */
 @Composable
 fun FileWindow() {
+    com.vrgames.minicase.platform.AppExit.CloseWithStage(FILE_ID)
     @Suppress("UNUSED_VARIABLE") val v = Game.version
     val book = Game.book
     val inv = Game.inv

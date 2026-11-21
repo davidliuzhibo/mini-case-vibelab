@@ -19,7 +19,10 @@ import com.vrgames.minicase.core.Cases
  *
  * cmd: all (every case in order) · case --es id wutong|inn|train · solve (the case on the table) ·
  * step (one hinted step) · hint · reset (wipe the save) · stop · view --es id "x,y,z,yaw,scale[,pitch]"|reset · open --es id board|file
- * (table pose for the emulator camera) · music
+ * (table pose for the emulator camera) · music · replace [--es id <seconds of zero head poses>] · quit ·
+ * v0.9.2: pick --es id <prop>[,turn] (pick up a thing of the case on the table as a pinch would; its clue shows if looking
+ * is enough, ",turn" turns it to its hidden side too) · rays (from the eyes to 9 points on 放回原处 and to the held thing:
+ * the first hit of each) · putback
  */
 object AutoPilot {
     const val ACTION = "com.vrgames.minicase.TEST"
@@ -34,11 +37,19 @@ object AutoPilot {
 
     /** Set by the stage: carries out one hinted step in the scene; false once the case is closed. */
     var stepper: (() -> Boolean)? = null
+    /** Set by the stage (v0.9.2 test hooks): pick up a named thing, cast the rays at 放回原处, put the thing back. */
+    var picker: ((String) -> Unit)? = null
+    var rays: (() -> Unit)? = null
+    var putBack: (() -> Unit)? = null
 
     fun register(context: Context) {
         if (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) return
         val receiver = object : BroadcastReceiver() {
-            override fun onReceive(c: Context, i: Intent) = command(i.getStringExtra("cmd") ?: "", i.getStringExtra("id"))
+            override fun onReceive(c: Context, i: Intent) {
+                // 2026-11-19: the menu's 退出, for the emulator test (every window of the app should go).
+                if (i.getStringExtra("cmd") == "quit") { android.util.Log.i(TAG, "cmd quit"); com.vrgames.minicase.platform.AppExit.finishAll(c) }
+                else command(i.getStringExtra("cmd") ?: "", i.getStringExtra("id"))
+            }
         }
         ContextCompat.registerReceiver(context.applicationContext, receiver, IntentFilter(ACTION), ContextCompat.RECEIVER_EXPORTED)
         Log.i(TAG, "ready")
@@ -68,6 +79,11 @@ object AutoPilot {
             "view" -> Game.debugView = id?.takeIf { it != "reset" }
             "open" -> Game.debugOpen = id
             "music" -> Game.toggleMusic().also { Log.i(TAG, "music on=${Game.musicOn}") }
+            // Measure the eyes and place the table again; --es id 2.5 makes the head read all zeros for 2.5 s first.
+            "replace" -> { Game.debugZeroHeadS = id?.toDoubleOrNull() ?: 0.0; Game.placeRequest++ }
+            "pick" -> if (id.isNullOrBlank()) Log.w(TAG, "pick needs --es id <prop>") else picker?.invoke(id) ?: Log.w(TAG, "pick: no stage")
+            "rays" -> rays?.invoke() ?: Log.w(TAG, "rays: no stage")
+            "putback" -> putBack?.invoke() ?: Log.w(TAG, "putback: no stage")
             else -> Log.w(TAG, "unknown cmd $cmd")
         }
     }

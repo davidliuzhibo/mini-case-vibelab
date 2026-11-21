@@ -1,0 +1,1 @@
+board,counterdrawer,fig_qian,fig_wu,fig_xiaoliu,fig_zhao,fig_zheng,keyboard,letter,loan,pillow,roof,sandal,scene_inn,stove,tinbox,trunk,winelog

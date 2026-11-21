@@ -41,6 +41,11 @@ object Layouts {
             "medcase" to lid,
             "propbox" to lid,
         ),
+        "opera" to mapOf(
+            "kuitou" to lid,
+            "qinbox" to lid,
+            "combbox" to lid,
+        ),
     )
 
     fun motion(caseId: String, propId: String): Motion? = motions[caseId]?.get(propId)

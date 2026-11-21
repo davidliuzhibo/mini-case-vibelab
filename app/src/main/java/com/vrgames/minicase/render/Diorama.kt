@@ -12,8 +12,10 @@ import com.pico.spatial.core.math.Quat
 import com.pico.spatial.core.math.Vector3
 import com.vrgames.minicase.core.Action
 import com.vrgames.minicase.core.Case
+import com.vrgames.minicase.core.InspectLayout
 import com.vrgames.minicase.core.Investigation
 import com.vrgames.minicase.core.Side
+import com.vrgames.minicase.core.TurnGate
 import com.vrgames.minicase.core.Vec3
 import kotlin.math.abs
 import kotlin.math.acos
@@ -82,6 +84,9 @@ class Diorama {
         val homeScale: Vector3,
         /** Size of the thing (meters, its own frame), for the close-up scale. */
         val size: Float,
+        /** v0.9.2: its visible bounds (own frame), for the pinch box on the table and up close. */
+        val boundsSize: Vector3,
+        val boundsCenter: Vector3,
     ) {
         var progress = 0.0
         var target = 0.0
@@ -111,7 +116,7 @@ class Diorama {
             val size = b.size
             val v = PropView(
                 p.id, e, p.action, Layouts.motion(c.id, p.id), p.hiddenSide, e.getParent(),
-                t.position, t.quaternion, t.scaleVector, maxOf(size.x, size.y, size.z),
+                t.position, t.quaternion, t.scaleVector, maxOf(size.x, size.y, size.z), b.size, b.center,
             )
             props[p.id] = v
             collide(e, b.size, b.center)
@@ -133,6 +138,14 @@ class Diorama {
         showHint(null)
     }
 
+    /** The middle of [personId]'s figurine, in the table's frame (where their voice comes from), or null. */
+    fun figurePos(personId: String): Vec3? {
+        val e = figures[personId] ?: return null
+        val b = runCatching { e.getVisualBounds(root, true, false) }.getOrNull() ?: return null
+        val c = b.center
+        return Vec3(c.x.toDouble(), c.y.toDouble(), c.z.toDouble())
+    }
+
     fun clear() {
         putBack()
         grab = null
@@ -145,11 +158,51 @@ class Diorama {
         sparks.clear()
     }
 
-    private fun collide(e: Entity, size: Vector3, center: Vector3) {
+    /**
+     * v0.9 (device 2026-11-18: the box in the drawer was very hard to pick): an opened drawer's box still holds what is in
+     * it, so a pinch aimed at the watch box landed on the drawer. Once a container is fully open, a pinch on it goes to
+     * the one thing inside it (the prop that needs it opened).
+     */
+    private fun intoOpened(g: Grab): Grab {
+        if (g !is Grab.Prop) return g
+        val v = props[g.id] ?: return g
+        if (v.action == Action.EXAMINE || !v.done) return g
+        val inner = case?.props?.filter { g.id in it.needs && props.containsKey(it.id) } ?: return g
+        return if (inner.size == 1) Grab.Prop(inner[0].id).also { android.util.Log.i("MiniCaseTable", "pinch on opened ${g.id} -> ${it.id}") } else g
+    }
+
+    private fun collide(e: Entity, size0: Vector3, center: Vector3) {
+        // v0.9: every pinch box 1.2 cm larger each way than the thing, and at least 4 cm (was 2.5): flat things such as
+        // the ledgers on the desk were thin slivers seen from the seat.
+        val size = Vector3(size0.x + 2 * PAD, size0.y + 2 * PAD, size0.z + 2 * PAD)
         val s = Vector3(maxOf(size.x, MIN_HIT), maxOf(size.y, MIN_HIT), maxOf(size.z, MIN_HIT))
-        e.components.set(CollisionComponent(listOf(ShapeResource.createBox(s).offsetByTranslation(center)), PhysicsMaterialResource()))
+        setBox(e, s, center)
         e.components.set(InteractableComponent())
         e.components.set(HoverEffectComponent())
+    }
+
+    private fun setBox(e: Entity, size: Vector3, center: Vector3) {
+        e.components.set(CollisionComponent(listOf(ShapeResource.createBox(size).offsetByTranslation(center)), PhysicsMaterialResource()))
+    }
+
+    /**
+     * v0.9.2 (device 2026-11-19): the table's enlarged pinch box (+1.2 cm, at least 4 cm) stayed on a thing held up close
+     * and grew with it (2.6-11.8 times): the medicine pack's reached 27 x 26 x 29 cm, past the item box's 放回原处, so a
+     * gaze-pinch on the button took the pack instead. Up close the box is the visible size plus [InspectLayout.HELD_PAD]
+     * each side; [putBack] gives the table's box back.
+     */
+    private fun heldBox(v: PropView) {
+        val k = InspectLayout.heldScale(v.size.toDouble())
+        fun edge(local: Float, home: Float) = InspectLayout.heldHitLocal(local.toDouble(), maxOf(abs(home.toDouble()), 1e-4) * k).toFloat()
+        val s = Vector3(edge(v.boundsSize.x, v.homeScale.x), edge(v.boundsSize.y, v.homeScale.y), edge(v.boundsSize.z, v.homeScale.z))
+        setBox(v.e, s, v.boundsCenter)
+        android.util.Log.i(
+            "MiniCaseTable",
+            "held ${v.id}: x%.2f, visible %.3f x %.3f x %.3f m, pinch box %.3f x %.3f x %.3f m".format(
+                k, v.boundsSize.x * v.homeScale.x * k, v.boundsSize.y * v.homeScale.y * k, v.boundsSize.z * v.homeScale.z * k,
+                s.x * v.homeScale.x * k, s.y * v.homeScale.y * k, s.z * v.homeScale.z * k,
+            ),
+        )
     }
 
     /** Where a prop or figure is, in the table's frame (for the hint arrow). */
@@ -164,12 +217,21 @@ class Diorama {
     private var grab: Grab? = null
     /** The prop held up close, if any (it stays up after the fingers open, until put back). */
     var inspecting: String? = null; private set
+
+    /** Test hook: the visible centre of the thing held up close, in the table's frame (null when nothing is held). */
+    fun heldCentre(): Vec3? {
+        val v = props[inspecting ?: return null] ?: return null
+        val b = v.e.getVisualBounds(root, true, false)
+        return Vec3(b.center.x.toDouble(), b.center.y.toDouble(), b.center.z.toDouble())
+    }
     private var inspectT = 0.0
     private var yaw = 0.0
     private var pitch = 0.0
     /** The held prop's turn by the hand's own rotation (table frame), under the drag's yaw and pitch. */
     private var handTurn = Quat(0f, 0f, 0f, 1f)
     private var hiddenSeen = 0.0
+    /** v0.9.2: the pick-up pinch itself does not turn the thing (its first ~150 ms and first centimetre are dropped). */
+    private val gate = TurnGate()
 
     val dragging get() = grab != null
 
@@ -182,6 +244,29 @@ class Diorama {
         return null
     }
 
+    /** Test hook (rays): what a ray hit — "prop:<id>", "figure:<id>", "panel:<id>", else the entity's name. */
+    fun describe(e: Entity?): String {
+        if (e == null) return "nothing"
+        when (val g = grabOf(e)) {
+            is Grab.Prop -> return "prop:${g.id}"
+            is Grab.Figure -> return "figure:${g.id}"
+            null -> Unit
+        }
+        var cur: Entity? = e
+        while (cur != null) {
+            panels.entries.firstOrNull { it.value == cur }?.let { return "panel:${it.key}" }
+            cur = cur.getParent()
+        }
+        return "other:${runCatching { e.getName() }.getOrNull().orEmpty()}"
+    }
+
+    /** A point in the table's frame, in the room (the frame the table root is placed in). */
+    fun toRoom(p: Vec3): Vec3 {
+        val r = root.transform().position
+        val d = turnY(p, facing.toDouble())
+        return Vec3(r.x + d.x, r.y + d.y, r.z + d.z)
+    }
+
     /** What pinching something did, for the stage to act on. */
     sealed interface Began {
         data class Talk(val person: String) : Began
@@ -192,8 +277,9 @@ class Diorama {
         data object Nothing : Began
     }
 
-    fun begin(g: Grab, inv: Investigation): Began {
+    fun begin(g0: Grab, inv: Investigation): Began {
         grab = null
+        val g = intoOpened(g0)
         // Between a case change and the new build, the old miniature is still on the table.
         if (inv.case.id != case?.id) return Began.Nothing
         return when (g) {
@@ -207,8 +293,13 @@ class Diorama {
                         if (inspecting != g.id) {
                             putBack()
                             pickUp(v)
+                            gate.close(android.os.SystemClock.uptimeMillis())
                             Began.PickedUp(g.id)
-                        } else Began.Pull
+                        } else {
+                            // A new pinch on the thing already up close: turning it is what it is for.
+                            gate.open()
+                            Began.Pull
+                        }
                     }
                     else -> if (v.done) Began.Nothing else {
                         grab = g
@@ -226,6 +317,7 @@ class Diorama {
         val v = props[g.id] ?: return
         when (v.action) {
             Action.EXAMINE -> if (inspecting == v.id) {
+                if (!gate.move(android.os.SystemClock.uptimeMillis(), d.x, d.y, d.z)) return
                 // Sideways turns it about the vertical, up and down tips it toward the player.
                 yaw += d.x * TURN_PER_METER
                 pitch = (pitch - d.y * TURN_PER_METER).coerceIn(-170.0, 170.0)
@@ -251,7 +343,11 @@ class Diorama {
     fun turnByHand(rel: Quat) {
         if (inspecting == null || grab !is Grab.Prop) return
         val w = abs(rel.w.toDouble()).coerceAtMost(1.0)
-        if (Math.toDegrees(2 * acos(w)) > 30) return
+        val deg = Math.toDegrees(2 * acos(w))
+        if (deg > 30) return
+        val sinHalf = kotlin.math.sqrt(maxOf(0.0, 1 - w * w))
+        val k = if (sinHalf < 1e-6) 0.0 else deg / sinHalf * kotlin.math.sign(rel.w.toDouble())
+        if (!gate.turn(android.os.SystemClock.uptimeMillis(), rel.x * k, rel.y * k, rel.z * k)) return
         val r = root.transform().quaternion
         val local = r.conjugate().times(rel).times(r)
         handTurn = local.times(handTurn).normalize()
@@ -287,12 +383,14 @@ class Diorama {
         return true
     }
 
-    /** AutoPilot: holds [id] up close, turned to show its hidden side (if any). */
-    fun autoPick(id: String) {
+    /** AutoPilot: holds [id] up close, turned to show its hidden side (if any) when [turned]. */
+    fun autoPick(id: String, turned: Boolean = true) {
         val v = props[id] ?: return
         if (v.action != Action.EXAMINE) return
         putBack()
         pickUp(v)
+        gate.open()
+        if (!turned) return
         when (v.hidden) {
             Side.BOTTOM -> pitch = -90.0
             Side.TOP -> pitch = 60.0
@@ -327,6 +425,7 @@ class Diorama {
         pitch = 0.0
         handTurn = Quat(0f, 0f, 0f, 1f)
         hiddenSeen = 0.0
+        revealFrom = Double.NaN
         // Into the table's frame (keeping where it is), then fly to the close-up spot.
         val at = v.e.convertPositionTo(Vector3(0f, 0f, 0f), root)
         val rot = v.e.convertRotationTo(Quat(0f, 0f, 0f, 1f), root)
@@ -336,6 +435,7 @@ class Diorama {
         v.e.transform().quaternion = rot
         flyFrom = Vec3(at.x.toDouble(), at.y.toDouble(), at.z.toDouble())
         flyRot = rot
+        heldBox(v)
     }
 
     private var flyFrom = Vec3.ZERO
@@ -352,6 +452,8 @@ class Diorama {
         t.position = v.homePos
         t.quaternion = v.homeRot
         t.scaleVector = v.homeScale
+        // The table's (enlarged) pinch box again.
+        collide(v.e, v.boundsSize, v.boundsCenter)
         if (grab == Grab.Prop(id)) grab = null
         return true
     }
@@ -374,12 +476,15 @@ class Diorama {
         sparks.update(dt)
     }
 
+    /** v0.9: how squarely the hidden side faced the player when the prop came up close (the turn is counted from there). */
+    private var revealFrom = Double.NaN
+
     private fun inspectFrame(v: PropView, dt: Double) {
         inspectT = minOf(1.0, inspectT + dt / FLY_S)
         val e = inspectT * inspectT * (3 - 2 * inspectT)
         val to = INSPECT_AT
         val pos = flyFrom + (to - flyFrom) * e
-        val scale = 1.0 + (INSPECT_SIZE / maxOf(v.size.toDouble(), 0.01) - 1.0) * e
+        val scale = 1.0 + (InspectLayout.heldScale(v.size.toDouble()) - 1.0) * e
         val t = v.e.transform()
         t.position = pos.toVector3()
         t.scaleVector = Vector3((v.homeScale.x * scale).toFloat(), (v.homeScale.y * scale).toFloat(), (v.homeScale.z * scale).toFloat())
@@ -391,7 +496,8 @@ class Diorama {
         val s = turn.rotateVector(Vector3(side.x.toFloat(), side.y.toFloat(), side.z.toFloat()))
         val toEye = (viewer - to).normalized()
         val facing = s.x * toEye.x + s.y * toEye.y + s.z * toEye.z
-        hiddenSeen = if (facing > SEEN_DOT) hiddenSeen + dt else 0.0
+        if (revealFrom.isNaN()) revealFrom = facing.toDouble()
+        hiddenSeen = if (com.vrgames.minicase.core.Reveal.seen(revealFrom, facing.toDouble())) hiddenSeen + dt else 0.0
         if (hiddenSeen > SEEN_S) {
             hiddenSeen = -1e9
             onHiddenSeen?.invoke(v.id)
@@ -524,19 +630,21 @@ class Diorama {
          * counterclockwise of straight ahead (negative turns it clockwise, seen from above).
          */
         const val YAW_TRIM = -12f
-        /** Where a picked-up thing floats (table frame): between the scene and the player, raised. */
-        val INSPECT_AT = Vec3(0.0, 0.24, 0.17)
-        /** Its size up close (meters). */
-        const val INSPECT_SIZE = 0.13
+        /**
+         * Where a picked-up thing floats (table frame): v0.9.2 left of the middle and lower, (-0.10, 0.20, 0.21), with its
+         * item box to its right and the clue box above (was (0, 0.24, 0.17), right under both boxes). See [InspectLayout].
+         */
+        val INSPECT_AT = InspectLayout.ITEM_AT
         const val FLY_S = 0.35
         /** Degrees of turn per meter the hand moves. */
-        const val TURN_PER_METER = 900.0
+        const val TURN_PER_METER = 1300.0
         /** How squarely the hidden side must face the player, and for how long. */
         const val SEEN_DOT = 0.72
-        const val SEEN_S = 0.35
+        const val SEEN_S = 0.12
         /** Let go past this much and a drawer or lid finishes opening. */
         const val OPEN_AT = 0.45
-        const val MIN_HIT = 0.025f
+        const val MIN_HIT = 0.04f
+        const val PAD = 0.012f
 
         fun turnY(d: Vec3, degrees: Double): Vec3 {
             val a = Math.toRadians(degrees)

@@ -55,6 +55,11 @@ data class Prop(
     val hiddenSide: Side? = null,
     /** Where the hint points the player, in a few words ("灶房的灶膛"). */
     val where: String,
+    /**
+     * v0.9.2, for EXAMINE: one plain line in the item box while it is held (what it is, no nudge to turn it, nothing of
+     * its clue). A prop with a [hiddenSide] shows the turning nudge instead until its clue is found.
+     */
+    val look: String = "",
 )
 
 /** A side of an object, in the object's own frame (+y up, -z its back). */

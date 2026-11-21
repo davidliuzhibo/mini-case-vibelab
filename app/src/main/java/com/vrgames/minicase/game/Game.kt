@@ -38,10 +38,13 @@ object Game {
     /** The 案情板 stands open behind the scene (it takes the place of the case card and the talk). */
     var boardOpen by mutableStateOf(false)
     /**
-     * The window on screen ([com.vrgames.minicase.FILE_ID]), or null. One at a time, and never twice: opening a
-     * window that is already open starts a second copy of it.
+     * The windows on screen (卷宗, 人物档案, 证物柜). Several may be up at once, each beside the table
+     * (contest round 2026-11-15); never one twice: opening a window that is already open starts a second copy.
      */
-    var window by mutableStateOf<String?>(null); private set
+    var openWindows by mutableStateOf<Set<String>>(emptySet()); private set
+    /** The first window up, or null (kept for the older call sites). */
+    val window: String? get() = openWindows.firstOrNull()
+    fun isOpen(id: String) = id in openWindows
     private val windowCopies = HashMap<String, Any>()
     /** Closes a window (set by the stage; the windows' 关闭 buttons call it). */
     var closeWindow: (String) -> Unit = {}
@@ -49,16 +52,19 @@ object Game {
     /** The window [id] opens (from the stage), or a [copy] of it comes on screen. */
     fun windowShown(id: String, copy: Any? = null) {
         if (copy != null) windowCopies[id] = copy
-        window = id
+        openWindows = openWindows + id
     }
 
     /** The window [id] is gone: closed from the stage, or the system took this [copy] down. */
     fun windowGone(id: String, copy: Any? = null) {
-        if (copy != null && windowCopies[id] !== copy) return
+        if (copy != null && windowCopies[id] != null && windowCopies[id] !== copy) return
         windowCopies.remove(id)
-        if (window == id) window = null
+        openWindows = openWindows - id
     }
-    /** The person being questioned in the scene, or null. */
+
+    /** The prop shown large in the 证物柜 window. */
+    var cabinetPick by mutableStateOf<String?>(null)
+
     var talkingTo by mutableStateOf<String?>(null)
     /** The answer just given in the scene's question panel. */
     var lastAnswer by mutableStateOf<String?>(null)
@@ -84,6 +90,10 @@ object Game {
     var music: com.vrgames.minicase.render.Music? = null
     /** Debug only (AutoPilot): table pose override "x,y,z,yaw,scale" to frame it for the emulator camera. */
     var debugView by mutableStateOf<String?>(null)
+    /** Bumped to measure the eye height and place the table again (debug hook "replace"). */
+    var placeRequest by mutableStateOf(0)
+    /** Debug only: the head reads all zeros this many seconds into a placement, as a device can right after start. */
+    var debugZeroHeadS = 0.0
     /** Debug only (AutoPilot): a window to open ("board" or "file"), cleared once opened. */
     var debugOpen by mutableStateOf<String?>(null)
 
@@ -94,7 +104,9 @@ object Game {
         prefs = p
         val saved = Cases.all.mapNotNull { c -> p.getString(KEY_CASE + c.id, null)?.let { c.id to it } }.toMap()
         synchronized(lock) { book = Casebook(saved) }
-        p.getFloat(KEY_HEIGHT, -1f).takeIf { it > 0 }?.let { tableHeight = it }
+        // v0.9: the old saved absolute height is no longer read (it carried a height from another session, another
+        // tracking origin); only the player's own 升高/降低 adjustment is kept.
+        tableAdjust = p.getFloat(KEY_ADJUST, 0f)
         musicOn = p.getBoolean(KEY_MUSIC, true)
         coached = p.getBoolean(KEY_COACHED, false)
         refresh(rebuild = true)
@@ -167,8 +179,20 @@ object Game {
     private var appContext: android.content.Context? = null
 
     /** Plays a character's recorded line; the music dips under it. */
+    /** Spatial voices (set by the stage), and where a person's figurine is on the table. */
+    var voice: com.vrgames.minicase.render.Voice? = null
+    var figureAt: (String) -> com.vrgames.minicase.core.Vec3? = { null }
+
     fun speak(id: String) {
         stopSpeaking()
+        // Heard from the speaker's own figurine when it is on the table (contest round 2026-11-15: spatial audio).
+        val who = inv.case.people.firstOrNull { p -> p.questions.any { it.id == id } }?.id
+        val at = who?.let { figureAt(it) }
+        if (at != null && voice?.play(id, at) == true) {
+            speaking = id
+            music?.ducked = true
+            return
+        }
         val c = appContext ?: return
         runCatching {
             val fd = c.assets.openFd("narration/$id.ogg")
@@ -185,6 +209,7 @@ object Game {
     }
 
     fun stopSpeaking() {
+        voice?.stop()
         runCatching { narrator?.stop() }
         runCatching { narrator?.release() }
         narrator = null
@@ -268,13 +293,28 @@ object Game {
     }
 
     fun raiseTable(d: Float) {
-        tableHeight = (tableHeight + d).coerceIn(0.5f, 1.3f)
-        prefs?.edit()?.putFloat(KEY_HEIGHT, tableHeight)?.apply()
+        tableAdjust = (tableAdjust + d).coerceIn(-0.3f, 0.3f)
+        tableHeight = lastEye?.let { com.vrgames.minicase.core.Placement.tableFor(it, tableAdjust) } ?: (tableHeight + d)
+        prefs?.edit()?.putFloat(KEY_ADJUST, tableAdjust)?.apply()
     }
 
-    /** The table was found by the headset's plane detection: use its height (not saved). */
+    /** The player's 升高/降低 on top of the height from the eyes (saved). */
+    var tableAdjust = 0f; private set
+    private var lastEye: Float? = null
+
+    /**
+     * v0.9 (device 2026-11-18: the scene came in 40–50 cm too low): the table is placed from the head's measured height
+     * every time, [Placement.tableFor], whatever the tracking origin is (floor or head) — no saved absolute height, no
+     * plane found under the table, no clamp to 0.5–1.3 m (with the origin at the head the right height is below zero).
+     */
+    fun fromEye(eye: Float) {
+        lastEye = eye
+        tableHeight = com.vrgames.minicase.core.Placement.tableFor(eye, tableAdjust)
+    }
+
+    /** Kept for the debug hooks: an absolute height. */
     fun tableFound(height: Float) {
-        tableHeight = height.coerceIn(0.5f, 1.3f)
+        tableHeight = height
     }
 
     /** Test hook: forget all progress. */
@@ -304,7 +344,7 @@ object Game {
 
     const val DEFAULT_TABLE_HEIGHT = 0.8f
     private const val KEY_CASE = "case_"
-    private const val KEY_HEIGHT = "table_height"
+    private const val KEY_ADJUST = "table_adjust"
     private const val KEY_MUSIC = "music"
     private const val KEY_COACHED = "coached"
 }
